@@ -190,5 +190,6 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
 
         params_map = {
             'qkv_proj': ['q_proj', 'k_proj', 'v_proj'],
-            'gate_up_proj': ['gate_proj', 'up_proj']
+            'mlp_h_to_4h': ['gate_proj', 'up_proj'],
+            'mlp_4h_to_h':['down_proj']
         }
