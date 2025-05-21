@@ -501,14 +501,16 @@ class Linear(nn.Module):
                         self.inv_input_scale.data = 1.0 / self.input_scale
 
         elif weight_mode == WeightMode.FUSED_QKV_LINEAR:
-            if len(weights) ==1: # accept single weight for the fused QKV
-                fused_weight = load_weight_shard(weights[0]['weight'],self.tp_size,
-                                                 self.tp_rank,self.tp_mode, device)
+            if len(weights) == 1:  # accept single weight for the fused QKV
+                fused_weight = load_weight_shard(weights[0]['weight'],
+                                                 self.tp_size, self.tp_rank,
+                                                 self.tp_mode, device)
                 _copy(self.weight, fused_weight)
 
                 if self.bias is not None:
-                    fused_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
-                                                   self.tp_rank, sel.tp_mode, device)
+                    fused_bias = load_weight_shard(weights[0]['bias'],
+                                                   self.tp_size, self.tp_rank,
+                                                   sel.tp_mode, device)
                     _copy(self.bias, fused_bias)
             else:
                 assert len(weights) == 3
@@ -569,36 +571,46 @@ class Linear(nn.Module):
 
                 if self.bias is not None:
                     q_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
-                                               self.tp_rank, self.tp_mode, device)
+                                               self.tp_rank, self.tp_mode,
+                                               device)
                     k_bias = load_weight_shard(weights[1]['bias'], self.tp_size,
-                                               self.tp_rank, self.tp_mode, device)
+                                               self.tp_rank, self.tp_mode,
+                                               device)
                     v_bias = load_weight_shard(weights[2]['bias'], self.tp_size,
-                                               self.tp_rank, self.tp_mode, device)
+                                               self.tp_rank, self.tp_mode,
+                                               device)
                     _copy(self.bias, torch.cat((q_bias, k_bias, v_bias)))
         elif weight_mode == WeightMode.FUSED_GATE_UP_LINEAR:
-            if len(weights) ==1: # accept single weights for the fused gate_up_proj present in HF model
-                fused_weight = load_weight_shard(weights[0]['weight'],self.tp_size,
-                                                 self.tp_rank, self.tp_mode, device)
+            if len(
+                    weights
+            ) == 1:  # accept single weights for the fused gate_up_proj present in HF model
+                fused_weight = load_weight_shard(weights[0]['weight'],
+                                                 self.tp_size, self.tp_rank,
+                                                 self.tp_mode, device)
                 _copy(self.weight, fused_weight)
 
                 if self.bias is not None:
-                    fused_bias = load_weight_shard(weights[0]['bias'],self.tp_size,
-                                                   self.tp_rank, self.tp_mode, device)
+                    fused_bias = load_weight_shard(weights[0]['bias'],
+                                                   self.tp_size, self.tp_rank,
+                                                   self.tp_mode, device)
                     _copy(self.bias, fused_bias)
             else:
                 assert len(weights) == 2
 
-                gate_weight = load_weight_shard(weights[0]['weight'], self.tp_size,
-                                                self.tp_rank, self.tp_mode, device)
-                up_weight = load_weight_shard(weights[1]['weight'], self.tp_size,
-                                              self.tp_rank, self.tp_mode, device)
+                gate_weight = load_weight_shard(weights[0]['weight'],
+                                                self.tp_size, self.tp_rank,
+                                                self.tp_mode, device)
+                up_weight = load_weight_shard(weights[1]['weight'],
+                                              self.tp_size, self.tp_rank,
+                                              self.tp_mode, device)
                 if quant_mode:
                     if quant_mode.has_fp8_qdq():
                         input_scale, weight_scale = load_weight_scales_fp8_qdq(
                             weights)
                         _copy(self.input_scale, max(input_scale))
                         _copy(self.weight_scale, max(weight_scale))
-                        gate_weight = gate_weight.to(self.dtype) * weight_scale[0]
+                        gate_weight = gate_weight.to(
+                            self.dtype) * weight_scale[0]
                         up_weight = up_weight.to(self.dtype) * weight_scale[1]
                     elif quant_mode.has_nvfp4():
                         input_scale, weight_scale, alpha = load_weight_scales_nvfp4(
@@ -618,12 +630,15 @@ class Linear(nn.Module):
                         if scale_name not in weights[0]:
                             scale_name = "weight_scale"
                         left_scale = load_weight_shard(weights[0][scale_name],
-                                                       self.tp_size, self.tp_rank,
+                                                       self.tp_size,
+                                                       self.tp_rank,
                                                        self.tp_mode, device)
                         right_scale = load_weight_shard(weights[1][scale_name],
-                                                        self.tp_size, self.tp_rank,
+                                                        self.tp_size,
+                                                        self.tp_rank,
                                                         self.tp_mode, device)
-                        fused_scale = torch.cat([left_scale, right_scale], dim=0)
+                        fused_scale = torch.cat([left_scale, right_scale],
+                                                dim=0)
                         _copy(self.weight_scale, fused_scale)
 
                 fused_weight = torch.cat((gate_weight, up_weight))
@@ -635,11 +650,12 @@ class Linear(nn.Module):
                 _copy(self.weight, fused_weight)
 
                 if self.bias is not None:
-                    gate_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
-                                                  self.tp_rank, self.tp_mode,
-                                                  device)
-                    up_bias = load_weight_shard(weights[1]['bias'], self.tp_size,
-                                                self.tp_rank, self.tp_mode, device)
+                    gate_bias = load_weight_shard(weights[0]['bias'],
+                                                  self.tp_size, self.tp_rank,
+                                                  self.tp_mode, device)
+                    up_bias = load_weight_shard(weights[1]['bias'],
+                                                self.tp_size, self.tp_rank,
+                                                self.tp_mode, device)
                     _copy(self.bias, torch.cat((up_bias, gate_bias)))
         else:
             raise ValueError(f'unsupported weight mode: {weight_mode}')

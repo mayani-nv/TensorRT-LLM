@@ -17,7 +17,7 @@ from tensorrt_llm._torch.modules.attention import Attention
 from tensorrt_llm._torch.modules.decoder_layer import DecoderLayer
 from tensorrt_llm._torch.modules.embedding import Embedding
 from tensorrt_llm._torch.modules.gated_mlp import GatedMLP
-from tensorrt_llm._torch.modules.linear import Linear, TensorParallelMode
+from tensorrt_llm._torch.modules.linear import TensorParallelMode
 from tensorrt_llm._torch.modules.rms_norm import RMSNorm
 from tensorrt_llm.functional import PositionEmbeddingType
 
@@ -34,7 +34,7 @@ class Phi3Attention(Attention):
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
             num_key_value_heads=config.num_key_value_heads,
-            max_position_embeddings=config.max_position_embeddings,        
+            max_position_embeddings=config.max_position_embeddings,
             bias=config.attention_bias,
             pos_embd_params=PositionalEmbeddingParams(
                 type=PositionEmbeddingType.rope_gpt_neox,
@@ -60,21 +60,21 @@ class Phi3DecoderLayer(DecoderLayer):
         self.self_attn = Phi3Attention(model_config, layer_idx=layer_idx)
 
         self.mlp = GatedMLP(
-            hidden_size = config.hidden_size,
-            intermediate_size = config.intermediate_size,
-            bias = False,
-            dtype = config.torch_dtype,
-            config = model_config, 
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            bias=False,
+            dtype=config.torch_dtype,
+            config=model_config,
         )
         self.input_layernorm = RMSNorm(
-            hidden_size = config.hidden_size,
-            eps = config.rms_norm_eps,
-            dtype = config.torch_dtype,
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=config.torch_dtype,
         )
         self.post_attention_layernorm = RMSNorm(
-            hidden_size = config.hidden_size,
-            eps = config.rms_norm_eps,
-            dtype = config.torch_dtype,
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=config.torch_dtype,
         )
 
     def forward(
@@ -82,18 +82,16 @@ class Phi3DecoderLayer(DecoderLayer):
         position_ids: torch.LongTensor,
         hidden_states: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor], 
+        residual: Optional[torch.Tensor],
         **kwargs,
     ) -> torch.Tensor:
 
-
-        print('debug: residual is ', residual)
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-               hidden_states, residual = self.input_layernorm(
-                 hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
 
         # Self Attention
         hidden_states = self.self_attn(
@@ -106,19 +104,19 @@ class Phi3DecoderLayer(DecoderLayer):
         # Fully connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, **kwargs) 
+        hidden_states = self.mlp(hidden_states, **kwargs)
         return hidden_states, residual
+
 
 @support_pp
 class Phi3Model(DecoderModel):
 
     def __init__(self, model_config: ModelConfig[Phi3Config]):
         super().__init__(model_config)
-        config = self.model_config.pretrained_config 
+        config = self.model_config.pretrained_config
         self.padding_idx = config.pad_token_id
 
-        vocab_size = config.vocab_size
-        print('debug: vocab_size:', vocab_size)
+        config.vocab_size
         self.embed_tokens = Embedding(
             config.vocab_size,
             config.hidden_size,
@@ -126,13 +124,13 @@ class Phi3Model(DecoderModel):
             mapping=model_config.mapping,
             tensor_parallel_mode=TensorParallelMode.COLUMN,
             gather_output=True,
-        )            
+        )
         self.layers = nn.ModuleList([
             Phi3DecoderLayer(
                 model_config,
                 layer_idx,
             ) for layer_idx in range(config.num_hidden_layers)
-        ])   
+        ])
         self.norm = RMSNorm(hidden_size=config.hidden_size,
                             eps=config.rms_norm_eps,
                             dtype=config.torch_dtype)
@@ -153,14 +151,14 @@ class Phi3Model(DecoderModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        hidden_states = inputs_embeds 
+        hidden_states = inputs_embeds
 
-        residual = None 
+        residual = None
         for decoder_layer in self.layers:
             hidden_states, residual = decoder_layer(hidden_states=hidden_states,
-                                          position_ids=position_ids,
-                                          residual=residual,
-                                          attn_metadata=attn_metadata)
+                                                    position_ids=position_ids,
+                                                    residual=residual,
+                                                    attn_metadata=attn_metadata)
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -178,8 +176,6 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
                          hidden_size=model_config.pretrained_config.hidden_size,
                          vocab_size=model_config.pretrained_config.vocab_size)
 
-
-    
     def load_weights(self, weights: dict):
         tp_size = self.model_config.mapping.tp_size
         head_dim = self.config.hidden_size // self.config.num_attention_heads
