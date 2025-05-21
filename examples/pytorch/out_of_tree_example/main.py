@@ -1,5 +1,5 @@
 import modeling_opt  # noqa
-
+import modeling_phi3
 from tensorrt_llm._torch import LLM
 
 
@@ -11,7 +11,8 @@ def main():
         "The future of AI is",
     ]
 
-    llm = LLM(model='facebook/opt-125m')
+    #llm = LLM(model='facebook/opt-125m')
+    llm = LLM(model='microsoft/Phi-3-mini-4k-instruct')
     outputs = llm.generate(prompts)
     # Print the outputs.
     for output in outputs:

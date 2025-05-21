@@ -440,6 +440,7 @@ class Linear(nn.Module):
             dst.data.copy_(src)
 
         weight_mode = self.weights_loading_config.weight_mode
+        print('debug: weight_mode', weight_mode)
         quant_mode = self.quant_config.quant_mode if self.quant_config else None
         # load weight shard onto GPU to speed up operations on the shards
         device = torch.device('cuda')
@@ -500,135 +501,145 @@ class Linear(nn.Module):
                         self.inv_input_scale.data = 1.0 / self.input_scale
 
         elif weight_mode == WeightMode.FUSED_QKV_LINEAR:
-            assert len(weights) == 3
+            if len(weights) ==1: # accept single weight for the fused QKV
+                fused_weight = load_weight_shard(weights[0]['weight'],self.tp_size,
+                                                 self.tp_rank,self.tp_mode, device)
+                _copy(self.weight, fused_weight)
 
-            q_weight = load_weight_shard(weights[0]['weight'], self.tp_size,
-                                         self.tp_rank, self.tp_mode, device)
-            k_weight = load_weight_shard(weights[1]['weight'], self.tp_size,
-                                         self.tp_rank, self.tp_mode, device)
-            v_weight = load_weight_shard(weights[2]['weight'], self.tp_size,
-                                         self.tp_rank, self.tp_mode, device)
+                if self.bias is not None:
+                    fused_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
+                                                   self.tp_rank, sel.tp_mode, device)
+                    _copy(self.bias, fused_bias)
+            else:
+                assert len(weights) == 3
 
-            if quant_mode:
-                if quant_mode.has_fp8_qdq():
-                    input_scale, weight_scale = load_weight_scales_fp8_qdq(
-                        weights)
-                    if len(input_scale) != 0:
-                        # Static quantization
+                q_weight = load_weight_shard(weights[0]['weight'], self.tp_size,
+                                             self.tp_rank, self.tp_mode, device)
+                k_weight = load_weight_shard(weights[1]['weight'], self.tp_size,
+                                             self.tp_rank, self.tp_mode, device)
+                v_weight = load_weight_shard(weights[2]['weight'], self.tp_size,
+                                             self.tp_rank, self.tp_mode, device)
+
+                if quant_mode:
+                    if quant_mode.has_fp8_qdq():
+                        input_scale, weight_scale = load_weight_scales_fp8_qdq(
+                            weights)
                         _copy(self.input_scale, max(input_scale))
-                    else:
-                        # Dynamic quantization
-                        self.input_scale = None
-                    _copy(self.weight_scale, max(weight_scale))
-                    q_weight = q_weight.to(self.dtype) * weight_scale[0]
-                    k_weight = k_weight.to(self.dtype) * weight_scale[1]
-                    v_weight = v_weight.to(self.dtype) * weight_scale[2]
-                elif quant_mode.has_nvfp4():
-                    input_scale, weight_scale, alpha = load_weight_scales_nvfp4(
-                        weights,
-                        tp_size=self.tp_size,
-                        tp_rank=self.tp_rank,
-                        tp_mode=self.tp_mode)
-                    # Swizzle weight scales after concatenation
-                    weight_scale = torch.cat(weight_scale, 0)
-                    weight_scale = torch.ops.tensorrt_llm.nvfp4_block_scale_interleave(
-                        weight_scale)
-                    _copy(self.input_scale, input_scale)
-                    _copy(self.weight_scale, weight_scale)
-                    _copy(self.alpha, alpha)
-                elif quant_mode.has_fp8_block_scales():
-                    scale_name = "weight_scale_inv"
-                    if scale_name not in weights[0]:
-                        scale_name = "weight_scale"
-                    q_scale = load_weight_shard(weights[0][scale_name],
-                                                self.tp_size, self.tp_rank,
-                                                self.tp_mode).contiguous()
-                    k_scale = load_weight_shard(weights[1][scale_name],
-                                                self.tp_size, self.tp_rank,
-                                                self.tp_mode).contiguous()
-                    v_scale = load_weight_shard(weights[2][scale_name],
-                                                self.tp_size, self.tp_rank,
-                                                self.tp_mode).contiguous()
-                    fused_fp8_block_scale = torch.cat(
-                        (q_scale, k_scale, v_scale))
-                    _copy(self.weight_scale, fused_fp8_block_scale)
-
-            fused_weight = torch.cat((q_weight, k_weight, v_weight))
-
-            if quant_mode and quant_mode.has_fp8_qdq():
-                fused_weight = (fused_weight / self.weight_scale).to(
-                    torch.float8_e4m3fn)
-
-            _copy(self.weight, fused_weight)
-
-            if self.bias is not None:
-                q_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
-                                           self.tp_rank, self.tp_mode, device)
-                k_bias = load_weight_shard(weights[1]['bias'], self.tp_size,
-                                           self.tp_rank, self.tp_mode, device)
-                v_bias = load_weight_shard(weights[2]['bias'], self.tp_size,
-                                           self.tp_rank, self.tp_mode, device)
-                _copy(self.bias, torch.cat((q_bias, k_bias, v_bias)))
-        elif weight_mode == WeightMode.FUSED_GATE_UP_LINEAR:
-            assert len(weights) == 2
-
-            gate_weight = load_weight_shard(weights[0]['weight'], self.tp_size,
-                                            self.tp_rank, self.tp_mode, device)
-            up_weight = load_weight_shard(weights[1]['weight'], self.tp_size,
-                                          self.tp_rank, self.tp_mode, device)
-            if quant_mode:
-                if quant_mode.has_fp8_qdq():
-                    input_scale, weight_scale = load_weight_scales_fp8_qdq(
-                        weights)
-                    if len(input_scale) != 0:
-                        # Static quantization
-                        _copy(self.input_scale, max(input_scale))
-                    else:
-                        # Dynamic quantization
-                        self.input_scale = None
-                    _copy(self.weight_scale, max(weight_scale))
-                    gate_weight = gate_weight.to(self.dtype) * weight_scale[0]
-                    up_weight = up_weight.to(self.dtype) * weight_scale[1]
-                elif quant_mode.has_nvfp4():
-                    input_scale, weight_scale, alpha = load_weight_scales_nvfp4(
-                        weights,
-                        tp_size=self.tp_size,
-                        tp_rank=self.tp_rank,
-                        tp_mode=self.tp_mode)
-                    # Swizzle weight scales after concatenation
-                    weight_scale = torch.cat(weight_scale, 0)
-                    weight_scale = torch.ops.tensorrt_llm.nvfp4_block_scale_interleave(
-                        weight_scale)
-                    _copy(self.input_scale, input_scale)
-                    _copy(self.weight_scale, weight_scale)
-                    _copy(self.alpha, alpha)
-                elif quant_mode.has_fp8_block_scales():
-                    scale_name = "weight_scale_inv"
-                    if scale_name not in weights[0]:
-                        scale_name = "weight_scale"
-                    left_scale = load_weight_shard(weights[0][scale_name],
-                                                   self.tp_size, self.tp_rank,
-                                                   self.tp_mode, device)
-                    right_scale = load_weight_shard(weights[1][scale_name],
+                        _copy(self.weight_scale, max(weight_scale))
+                        q_weight = q_weight.to(self.dtype) * weight_scale[0]
+                        k_weight = k_weight.to(self.dtype) * weight_scale[1]
+                        v_weight = v_weight.to(self.dtype) * weight_scale[2]
+                    elif quant_mode.has_nvfp4():
+                        input_scale, weight_scale, alpha = load_weight_scales_nvfp4(
+                            weights,
+                            tp_size=self.tp_size,
+                            tp_rank=self.tp_rank,
+                            tp_mode=self.tp_mode)
+                        # Swizzle weight scales after concatenation
+                        weight_scale = torch.cat(weight_scale, 0)
+                        weight_scale = torch.ops.tensorrt_llm.nvfp4_block_scale_interleave(
+                            weight_scale)
+                        _copy(self.input_scale, input_scale)
+                        _copy(self.weight_scale, weight_scale)
+                        _copy(self.alpha, alpha)
+                    elif quant_mode.has_fp8_block_scales():
+                        scale_name = "weight_scale_inv"
+                        if scale_name not in weights[0]:
+                            scale_name = "weight_scale"
+                        q_scale = load_weight_shard(weights[0][scale_name],
                                                     self.tp_size, self.tp_rank,
-                                                    self.tp_mode, device)
-                    fused_scale = torch.cat([left_scale, right_scale], dim=0)
-                    _copy(self.weight_scale, fused_scale)
+                                                    self.tp_mode).contiguous()
+                        k_scale = load_weight_shard(weights[1][scale_name],
+                                                    self.tp_size, self.tp_rank,
+                                                    self.tp_mode).contiguous()
+                        v_scale = load_weight_shard(weights[2][scale_name],
+                                                    self.tp_size, self.tp_rank,
+                                                    self.tp_mode).contiguous()
+                        fused_fp8_block_scale = torch.cat(
+                            (q_scale, k_scale, v_scale))
+                        _copy(self.weight_scale, fused_fp8_block_scale)
 
-            fused_weight = torch.cat((gate_weight, up_weight))
+                fused_weight = torch.cat((q_weight, k_weight, v_weight))
 
-            if quant_mode and quant_mode.has_fp8_qdq():
-                fused_weight = (fused_weight / self.weight_scale).to(
-                    torch.float8_e4m3fn)
+                if quant_mode and quant_mode.has_fp8_qdq():
+                    fused_weight = (fused_weight / self.weight_scale).to(
+                        torch.float8_e4m3fn)
 
-            _copy(self.weight, fused_weight)
+                _copy(self.weight, fused_weight)
 
-            if self.bias is not None:
-                gate_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
-                                              self.tp_rank, self.tp_mode,
-                                              device)
-                up_bias = load_weight_shard(weights[1]['bias'], self.tp_size,
-                                            self.tp_rank, self.tp_mode, device)
-                _copy(self.bias, torch.cat((up_bias, gate_bias)))
+                if self.bias is not None:
+                    q_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
+                                               self.tp_rank, self.tp_mode, device)
+                    k_bias = load_weight_shard(weights[1]['bias'], self.tp_size,
+                                               self.tp_rank, self.tp_mode, device)
+                    v_bias = load_weight_shard(weights[2]['bias'], self.tp_size,
+                                               self.tp_rank, self.tp_mode, device)
+                    _copy(self.bias, torch.cat((q_bias, k_bias, v_bias)))
+        elif weight_mode == WeightMode.FUSED_GATE_UP_LINEAR:
+            if len(weights) ==1: # accept single weights for the fused gate_up_proj present in HF model
+                fused_weight = load_weight_shard(weights[0]['weight'],self.tp_size,
+                                                 self.tp_rank, self.tp_mode, device)
+                _copy(self.weight, fused_weight)
+
+                if self.bias is not None:
+                    fused_bias = load_weight_shard(weights[0]['bias'],self.tp_size,
+                                                   self.tp_rank, self.tp_mode, device)
+                    _copy(self.bias, fused_bias)
+            else:
+                assert len(weights) == 2
+
+                gate_weight = load_weight_shard(weights[0]['weight'], self.tp_size,
+                                                self.tp_rank, self.tp_mode, device)
+                up_weight = load_weight_shard(weights[1]['weight'], self.tp_size,
+                                              self.tp_rank, self.tp_mode, device)
+                if quant_mode:
+                    if quant_mode.has_fp8_qdq():
+                        input_scale, weight_scale = load_weight_scales_fp8_qdq(
+                            weights)
+                        _copy(self.input_scale, max(input_scale))
+                        _copy(self.weight_scale, max(weight_scale))
+                        gate_weight = gate_weight.to(self.dtype) * weight_scale[0]
+                        up_weight = up_weight.to(self.dtype) * weight_scale[1]
+                    elif quant_mode.has_nvfp4():
+                        input_scale, weight_scale, alpha = load_weight_scales_nvfp4(
+                            weights,
+                            tp_size=self.tp_size,
+                            tp_rank=self.tp_rank,
+                            tp_mode=self.tp_mode)
+                        # Swizzle weight scales after concatenation
+                        weight_scale = torch.cat(weight_scale, 0)
+                        weight_scale = torch.ops.tensorrt_llm.nvfp4_block_scale_interleave(
+                            weight_scale)
+                        _copy(self.input_scale, input_scale)
+                        _copy(self.weight_scale, weight_scale)
+                        _copy(self.alpha, alpha)
+                    elif quant_mode.has_fp8_block_scales():
+                        scale_name = "weight_scale_inv"
+                        if scale_name not in weights[0]:
+                            scale_name = "weight_scale"
+                        left_scale = load_weight_shard(weights[0][scale_name],
+                                                       self.tp_size, self.tp_rank,
+                                                       self.tp_mode, device)
+                        right_scale = load_weight_shard(weights[1][scale_name],
+                                                        self.tp_size, self.tp_rank,
+                                                        self.tp_mode, device)
+                        fused_scale = torch.cat([left_scale, right_scale], dim=0)
+                        _copy(self.weight_scale, fused_scale)
+
+                fused_weight = torch.cat((gate_weight, up_weight))
+
+                if quant_mode and quant_mode.has_fp8_qdq():
+                    fused_weight = (fused_weight / self.weight_scale).to(
+                        torch.float8_e4m3fn)
+
+                _copy(self.weight, fused_weight)
+
+                if self.bias is not None:
+                    gate_bias = load_weight_shard(weights[0]['bias'], self.tp_size,
+                                                  self.tp_rank, self.tp_mode,
+                                                  device)
+                    up_bias = load_weight_shard(weights[1]['bias'], self.tp_size,
+                                                self.tp_rank, self.tp_mode, device)
+                    _copy(self.bias, torch.cat((up_bias, gate_bias)))
         else:
             raise ValueError(f'unsupported weight mode: {weight_mode}')
