@@ -117,24 +117,34 @@ def load_weights_vanilla_helper(module: Linear, weights: List[Dict]):
 def load_weights_fused_qkv_helper(
         module: Linear,
         weights: List[Dict]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert len(weights) == 3
     device = torch.device('cuda')
+    if len(weights) == 1:
+        weight = load_weight_shard(weights[0]['weight'], module.tp_size,
+                                 module.tp_rank, module.tp_mode, device)
+        copy_weight(module.weight, weight)
 
-    q_weight = load_weight_shard(weights[0]['weight'], module.tp_size,
-                                 module.tp_rank, module.tp_mode, device)
-    k_weight = load_weight_shard(weights[1]['weight'], module.tp_size,
-                                 module.tp_rank, module.tp_mode, device)
-    v_weight = load_weight_shard(weights[2]['weight'], module.tp_size,
-                                 module.tp_rank, module.tp_mode, device)
+        if module.bias is not None:
+            bias = load_weight_shard(weights[0]['bias'], module.tp_size,
+                                     module.tp_rank, module.tp_mode, device)
+            copy_weight(module.bias, bias)
+        return (None, None, None)
+    else:
+        assert len(weights) == 3
+        q_weight = load_weight_shard(weights[0]['weight'], module.tp_size,
+                                    module.tp_rank, module.tp_mode, device)
+        k_weight = load_weight_shard(weights[1]['weight'], module.tp_size,
+                                    module.tp_rank, module.tp_mode, device)
+        v_weight = load_weight_shard(weights[2]['weight'], module.tp_size,
+                                    module.tp_rank, module.tp_mode, device)
 
-    if module.bias is not None:
-        q_bias = load_weight_shard(weights[0]['bias'], module.tp_size,
-                                   module.tp_rank, module.tp_mode, device)
-        k_bias = load_weight_shard(weights[1]['bias'], module.tp_size,
-                                   module.tp_rank, module.tp_mode, device)
-        v_bias = load_weight_shard(weights[2]['bias'], module.tp_size,
-                                   module.tp_rank, module.tp_mode, device)
-        copy_weight(module.bias, torch.cat((q_bias, k_bias, v_bias)))
+        if module.bias is not None:
+            q_bias = load_weight_shard(weights[0]['bias'], module.tp_size,
+                                    module.tp_rank, module.tp_mode, device)
+            k_bias = load_weight_shard(weights[1]['bias'], module.tp_size,
+                                    module.tp_rank, module.tp_mode, device)
+            v_bias = load_weight_shard(weights[2]['bias'], module.tp_size,
+                                    module.tp_rank, module.tp_mode, device)
+            copy_weight(module.bias, torch.cat((q_bias, k_bias, v_bias)))
 
     return (q_weight, k_weight, v_weight)
 
@@ -142,20 +152,29 @@ def load_weights_fused_qkv_helper(
 def load_weights_fused_gate_up_helper(
         module: Linear,
         weights: List[Dict]) -> tuple[torch.Tensor, torch.Tensor]:
-    assert len(weights) == 2
     device = torch.device('cuda')
-
-    gate_weight = load_weight_shard(weights[0]['weight'], module.tp_size,
-                                    module.tp_rank, module.tp_mode, device)
-    up_weight = load_weight_shard(weights[1]['weight'], module.tp_size,
-                                  module.tp_rank, module.tp_mode, device)
-    if module.bias is not None:
-        gate_bias = load_weight_shard(weights[0]['bias'], module.tp_size,
+    if len(weights) == 1:
+        weight = load_weight_shard(weights[0]['weight'], module.tp_size,
+                                   module.tp_rank, module.tp_mode, device)
+        copy_weight(module.weight, weight)
+        if module.bias is not None:
+            bias = load_weight_shard(weights[0]['bias'], module.tp_size,
+                                     module.tp_rank, module.tp_mode, device)
+            copy_weight(module.bias, bias)
+        return (None, None)
+    else:
+        assert len(weights) == 2
+        gate_weight = load_weight_shard(weights[0]['weight'], module.tp_size,
+                                        module.tp_rank, module.tp_mode, device)
+        up_weight = load_weight_shard(weights[1]['weight'], module.tp_size,
                                       module.tp_rank, module.tp_mode, device)
-        up_bias = load_weight_shard(weights[1]['bias'], module.tp_size,
-                                    module.tp_rank, module.tp_mode, device)
-        copy_weight(module.bias, torch.cat((up_bias, gate_bias)))
-    return (gate_weight, up_weight)
+        if module.bias is not None:
+            gate_bias = load_weight_shard(weights[0]['bias'], module.tp_size,
+                                          module.tp_rank, module.tp_mode, device)
+            up_bias = load_weight_shard(weights[1]['bias'], module.tp_size,
+                                        module.tp_rank, module.tp_mode, device)
+            copy_weight(module.bias, torch.cat((up_bias, gate_bias)))
+        return (gate_weight, up_weight)
 
 
 class LinearMethodBase(ABC):
@@ -249,6 +268,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
                                       weights: List[Dict]):
         q_weight, k_weight, v_weight = load_weights_fused_qkv_helper(
             module, weights)
+        if q_weight is None:
+            return
         fused_weight = torch.cat((q_weight, k_weight, v_weight))
         copy_weight(module.weight, fused_weight)
 
@@ -256,6 +277,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
                                           weights: List[Dict]):
         gate_weight, up_weight = load_weights_fused_gate_up_helper(
             module, weights)
+        if gate_weight is None:
+            return
         fused_weight = torch.cat((gate_weight, up_weight))
         copy_weight(module.weight, fused_weight)
 
@@ -338,6 +361,8 @@ class FP8QDQLinearMethod(LinearMethodBase):
                                       weights: List[Dict]):
         q_weight, k_weight, v_weight = load_weights_fused_qkv_helper(
             module, weights)
+        if q_weight is None:
+            return
 
         input_scale, weight_scale = self.load_weight_scales(weights)
         if len(input_scale) != 0:
@@ -359,6 +384,11 @@ class FP8QDQLinearMethod(LinearMethodBase):
 
     def load_weights_fused_gate_up_linear(self, module: Linear,
                                           weights: List[Dict]):
+        gate_weight, up_weight = load_weights_fused_gate_up_helper(
+            module, weights)
+        if gate_weight is None:
+            return
+
         input_scale, weight_scale = self.load_weight_scales(weights)
         if len(input_scale) != 0:
             # Static quantization
@@ -367,9 +397,6 @@ class FP8QDQLinearMethod(LinearMethodBase):
             # Dynamic quantization
             module.input_scale = None
         copy_weight(module.weight_scale, max(weight_scale))
-
-        gate_weight, up_weight = load_weights_fused_gate_up_helper(
-            module, weights)
 
         gate_weight = gate_weight.to(module.dtype) * weight_scale[0]
         up_weight = up_weight.to(module.dtype) * weight_scale[1]
@@ -443,6 +470,8 @@ class FP8BlockScalesLinearMethod(LinearMethodBase):
                                       weights: List[Dict]):
         q_weight, k_weight, v_weight = load_weights_fused_qkv_helper(
             module, weights)
+        if q_weight is None:
+            return
         fused_weight = torch.cat((q_weight, k_weight, v_weight))
         copy_weight(module.weight, fused_weight)
 
@@ -460,6 +489,8 @@ class FP8BlockScalesLinearMethod(LinearMethodBase):
                                           weights: List[Dict]):
         gate_weight, up_weight = load_weights_fused_gate_up_helper(
             module, weights)
+        if gate_weight is None:
+            return
         fused_weight = torch.cat((gate_weight, up_weight))
         copy_weight(module.weight, fused_weight)
 
@@ -591,6 +622,8 @@ class NVFP4LinearMethod(LinearMethodBase):
                                       weights: List[Dict]):
         q_weight, k_weight, v_weight = load_weights_fused_qkv_helper(
             module, weights)
+        if q_weight is None:
+            return
 
         input_scale, weight_scales, alpha = self.load_weight_scales(
             weights,
@@ -612,6 +645,8 @@ class NVFP4LinearMethod(LinearMethodBase):
                                           weights: List[Dict]):
         gate_weight, up_weight = load_weights_fused_gate_up_helper(
             module, weights)
+        if gate_weight is None:
+            return
         fused_weight = torch.cat((gate_weight, up_weight))
         copy_weight(module.weight, fused_weight)
 
@@ -714,6 +749,8 @@ class W4A8MXFP4FP8LinearMethod(LinearMethodBase):
                                       weights: List[Dict]):
         q_weight, k_weight, v_weight = load_weights_fused_qkv_helper(
             module, weights)
+        if q_weight is None:
+            return
         fused_weight = torch.cat((q_weight, k_weight, v_weight))
         copy_weight(module.weight, fused_weight)
 
@@ -730,6 +767,8 @@ class W4A8MXFP4FP8LinearMethod(LinearMethodBase):
                                           weights: List[Dict]):
         gate_weight, up_weight = load_weights_fused_gate_up_helper(
             module, weights)
+        if gate_weight is None:
+            return
         fused_weight = torch.cat((gate_weight, up_weight))
         copy_weight(module.weight, fused_weight)
 
