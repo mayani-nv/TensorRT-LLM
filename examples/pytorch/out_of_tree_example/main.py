@@ -12,7 +12,7 @@ def main():
         "The future of AI is",
     ]
 
-    llm = LLM(model='microsoft/Phi-3-mini-128k-instruct')
+    llm = LLM(model='microsoft/Phi-3-small-8k-instruct')
     outputs = llm.generate(prompts)
     # Print the outputs.
     for output in outputs:

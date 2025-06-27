@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from torch import nn
 from tqdm import tqdm
-from transformers import Phi3Config
+from transformers import Phi3Config, PretrainedConfig
 
 from tensorrt_llm._torch.attention_backend import AttentionMetadata
 from tensorrt_llm._torch.attention_backend.interface import (
@@ -99,7 +99,7 @@ class Phi3Attention(Attention):
         config = model_config.pretrained_config
         
         rope_params = RopeParams.from_config(config)
-        if hasattr(config, "rope_scaling") and config.rope_scaling['type'] == 'longrope':
+        if hasattr(config, "rope_scaling") and config.rope_scaling is not None and config.rope_scaling.get('type') == 'longrope':
             rope_params.scale_type = RotaryScalingType.longrope
             rope_params.short_factor = config.rope_scaling['short_factor']
             rope_params.long_factor = config.rope_scaling['long_factor']
