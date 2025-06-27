@@ -106,3 +106,5 @@ speakleash/Bielik-11B-v2.2-Instruct:
     accuracy: 40.41
 google/gemma-3-1b-it:
   - accuracy: 25.52 # score getting from lm-eval with HF implementation
+microsoft/Phi-4-multimodal-instruct:
+  - accuracy: 65.77
