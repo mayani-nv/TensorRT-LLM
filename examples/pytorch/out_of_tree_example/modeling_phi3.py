@@ -1,10 +1,10 @@
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
-import torch
 import numpy as np
+import torch
 from torch import nn
 from tqdm import tqdm
-from transformers import Phi3Config, PretrainedConfig
+from transformers import Phi3Config
 
 from tensorrt_llm._torch.attention_backend import AttentionMetadata
 from tensorrt_llm._torch.attention_backend.interface import (
@@ -17,24 +17,25 @@ from tensorrt_llm._torch.modules.attention import Attention
 from tensorrt_llm._torch.modules.decoder_layer import DecoderLayer
 from tensorrt_llm._torch.modules.embedding import Embedding
 from tensorrt_llm._torch.modules.gated_mlp import GatedMLP
-from tensorrt_llm._torch.modules.linear import Linear, TensorParallelMode
+from tensorrt_llm._torch.modules.linear import (TensorParallelMode, WeightMode,
+                                                WeightsLoadingConfig)
 from tensorrt_llm._torch.modules.rms_norm import RMSNorm
 from tensorrt_llm.functional import PositionEmbeddingType, RotaryScalingType
 
 
-def create_sinusoidal_positions_long_rope(
-        num_pos: int,
-        dim: int,
-        theta: float,
-        original_max_pos: int,
-        short_factor: List[float],
-        long_factor: List[float],
-        dtype=np.float32):
+def create_sinusoidal_positions_long_rope(num_pos: int,
+                                          dim: int,
+                                          theta: float,
+                                          original_max_pos: int,
+                                          short_factor: List[float],
+                                          long_factor: List[float],
+                                          dtype=np.float32):
 
     short_factor = torch.tensor(short_factor, dtype=torch.float32)
     long_factor = torch.tensor(long_factor, dtype=torch.float32)
 
-    inv_freq = 1.0 / (theta**(torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    inv_freq = 1.0 / (theta
+                      **(torch.arange(0, dim, 2, dtype=torch.float32) / dim))
 
     # Short part
     inv_freq_short = inv_freq / short_factor
@@ -43,26 +44,28 @@ def create_sinusoidal_positions_long_rope(
 
     # Long part
     inv_freq_long = inv_freq / long_factor
-    t_long = torch.arange(max(0, num_pos - original_max_pos), dtype=torch.float32) + original_max_pos
+    t_long = torch.arange(max(0, num_pos - original_max_pos),
+                          dtype=torch.float32) + original_max_pos
     freqs_long = torch.einsum("i,j->ij", t_long, inv_freq_long)
 
     freqs = torch.cat([freqs_short, freqs_long], dim=0)
 
     sinusoid_inp = freqs.float().unsqueeze(-1).numpy()
-    
+
     # fuse cos/sin into float2 (cos, sin).
-    concat = np.concatenate(
-        (np.cos(sinusoid_inp), np.sin(sinusoid_inp)),
-        axis=-1)
+    concat = np.concatenate((np.cos(sinusoid_inp), np.sin(sinusoid_inp)),
+                            axis=-1)
 
     return None, concat.reshape(1, -1).astype(dtype)
 
 
 _old_create_rope_const_params = RopeParams.create_rope_const_params
 
+
 def _new_create_rope_const_params(self, interleave: bool = True):
     # self is a RopeParams object
-    if hasattr(self, 'scale_type') and self.scale_type == RotaryScalingType.longrope:
+    if hasattr(self,
+               'scale_type') and self.scale_type == RotaryScalingType.longrope:
         rope_inv_freq = None
         _, rope_cos_sin = create_sinusoidal_positions_long_rope(
             num_pos=self.max_positions,
@@ -76,7 +79,7 @@ def _new_create_rope_const_params(self, interleave: bool = True):
             rope_cos_sin = rope_cos_sin.reshape(
                 self.max_positions, -1,
                 2)[:, :self.dim // 2, :].transpose(0, 2, 1).reshape(1, -1)
-        
+
         rope_cos_sin = torch.tensor(
             rope_cos_sin,
             dtype=torch.float32,
@@ -85,6 +88,7 @@ def _new_create_rope_const_params(self, interleave: bool = True):
         return rope_inv_freq, rope_cos_sin
     else:
         return _old_create_rope_const_params(self, interleave)
+
 
 RopeParams.create_rope_const_params = _new_create_rope_const_params
 
@@ -97,9 +101,12 @@ class Phi3Attention(Attention):
         layer_idx: Optional[int] = None,
     ):
         config = model_config.pretrained_config
-        
+
         rope_params = RopeParams.from_config(config)
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None and config.rope_scaling.get('type') == 'longrope':
+        if hasattr(
+                config, "rope_scaling"
+        ) and config.rope_scaling is not None and config.rope_scaling[
+                'type'] == 'longrope':
             rope_params.scale_type = RotaryScalingType.longrope
             rope_params.short_factor = config.rope_scaling['short_factor']
             rope_params.long_factor = config.rope_scaling['long_factor']
@@ -109,7 +116,7 @@ class Phi3Attention(Attention):
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
             num_key_value_heads=config.num_key_value_heads,
-            max_position_embeddings=config.max_position_embeddings,        
+            max_position_embeddings=config.max_position_embeddings,
             bias=config.attention_bias,
             pos_embd_params=PositionalEmbeddingParams(
                 type=PositionEmbeddingType.rope_gpt_neox,
@@ -119,6 +126,9 @@ class Phi3Attention(Attention):
             dtype=config.torch_dtype,
             config=model_config,
         )
+        # Override the weights_loading_config for qkv_proj.
+        # self.qkv_proj.weights_loading_config = WeightsLoadingConfig(
+        #     weight_mode=WeightMode.VANILLA, )
 
 
 class Phi3DecoderLayer(DecoderLayer):
@@ -135,21 +145,25 @@ class Phi3DecoderLayer(DecoderLayer):
         self.self_attn = Phi3Attention(model_config, layer_idx=layer_idx)
 
         self.mlp = GatedMLP(
-            hidden_size = config.hidden_size,
-            intermediate_size = config.intermediate_size,
-            bias = False,
-            dtype = config.torch_dtype,
-            config = model_config, 
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            bias=False,
+            dtype=config.torch_dtype,
+            config=model_config,
         )
+        # Override the weights_loading_config for gate_up_proj.
+        # self.mlp.gate_up_proj.weights_loading_config = WeightsLoadingConfig(
+        #     weight_mode=WeightMode.VANILLA, )
+
         self.input_layernorm = RMSNorm(
-            hidden_size = config.hidden_size,
-            eps = config.rms_norm_eps,
-            dtype = config.torch_dtype,
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=config.torch_dtype,
         )
         self.post_attention_layernorm = RMSNorm(
-            hidden_size = config.hidden_size,
-            eps = config.rms_norm_eps,
-            dtype = config.torch_dtype,
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=config.torch_dtype,
         )
 
     def forward(
@@ -157,42 +171,41 @@ class Phi3DecoderLayer(DecoderLayer):
         position_ids: torch.LongTensor,
         hidden_states: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor], 
+        residual: Optional[torch.Tensor],
+        lora_params=None,
         **kwargs,
     ) -> torch.Tensor:
-
-
-        print('debug: residual is ', residual)
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-               hidden_states, residual = self.input_layernorm(
-                 hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
 
         # Self Attention
         hidden_states = self.self_attn(
             position_ids=None,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
+            lora_params=lora_params,
             **kwargs,
         )
 
         # Fully connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, **kwargs) 
+        hidden_states = self.mlp(hidden_states, **kwargs)
         return hidden_states, residual
+
 
 class Phi3Model(DecoderModel):
 
     def __init__(self, model_config: ModelConfig[Phi3Config]):
         super().__init__(model_config)
-        config = self.model_config.pretrained_config 
+        config = self.model_config.pretrained_config
         self.padding_idx = config.pad_token_id
 
-        vocab_size = config.vocab_size
-        print('debug: vocab_size:', vocab_size)
+        config.vocab_size
         self.embed_tokens = Embedding(
             config.vocab_size,
             config.hidden_size,
@@ -200,16 +213,18 @@ class Phi3Model(DecoderModel):
             mapping=model_config.mapping,
             tensor_parallel_mode=TensorParallelMode.COLUMN,
             gather_output=True,
-        )            
+        )
         self.layers = nn.ModuleList([
             Phi3DecoderLayer(
                 model_config,
                 layer_idx,
             ) for layer_idx in range(config.num_hidden_layers)
-        ])   
-        self.norm = RMSNorm(hidden_size=config.hidden_size,
-                            eps=config.rms_norm_eps,
-                            dtype=config.torch_dtype)
+        ])
+        self.norm = RMSNorm(
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=config.torch_dtype,
+        )
 
     def forward(
         self,
@@ -217,6 +232,7 @@ class Phi3Model(DecoderModel):
         input_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        lora_params=None,
         **kwargs,
     ) -> torch.Tensor:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -227,14 +243,17 @@ class Phi3Model(DecoderModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        hidden_states = inputs_embeds 
+        hidden_states = inputs_embeds
 
-        residual = None 
+        residual = None
         for decoder_layer in self.layers:
-            hidden_states, residual = decoder_layer(hidden_states=hidden_states,
-                                          position_ids=position_ids,
-                                          residual=residual,
-                                          attn_metadata=attn_metadata)
+            hidden_states, residual = decoder_layer(
+                hidden_states=hidden_states,
+                position_ids=position_ids,
+                residual=residual,
+                attn_metadata=attn_metadata,
+                lora_params=lora_params,
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -252,8 +271,6 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
                          hidden_size=model_config.pretrained_config.hidden_size,
                          vocab_size=model_config.pretrained_config.vocab_size)
 
-
-    
     def load_weights(self, weights: dict):
         tp_size = self.model_config.mapping.tp_size
         head_dim = self.config.hidden_size // self.config.num_attention_heads
@@ -270,9 +287,6 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
 
         for name, module in tqdm(list(self.named_modules()),
                                  desc="Loading weights"):
-            if "self_attn" in name and "qkv_proj" in name:
-                print(f"DEBUG: Loading weight for {name}")
-                
             if len(module._parameters) > 0:
                 # skip load weights if tie word embeddings is enabled and layer is lm_head
                 if self.config.tie_word_embeddings and name.startswith(
@@ -312,7 +326,6 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
                             head_dim = hidden_size // num_heads
                             
                             # Reshape and split the weights
-                            # The original layout is packed, we need to separate Q, K, and V.
                             q_weight = qkv_weight[:hidden_size, :]
                             k_weight = qkv_weight[hidden_size:hidden_size + num_kv_heads * head_dim, :]
                             v_weight = qkv_weight[hidden_size + num_kv_heads * head_dim:, :]
@@ -341,3 +354,4 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
                         for n, p in module._parameters.items():
                             if p is not None:
                                 p.data.copy_(module_weights[n][:])
+       
