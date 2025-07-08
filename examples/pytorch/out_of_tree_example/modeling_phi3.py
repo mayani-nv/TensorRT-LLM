@@ -270,6 +270,9 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
 
         for name, module in tqdm(list(self.named_modules()),
                                  desc="Loading weights"):
+            if "self_attn" in name and "qkv_proj" in name:
+                print(f"DEBUG: Loading weight for {name}")
+                
             if len(module._parameters) > 0:
                 # skip load weights if tie word embeddings is enabled and layer is lm_head
                 if self.config.tie_word_embeddings and name.startswith(
@@ -297,7 +300,43 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
                 else:
                     module_weights = filter_weights(name, weights)
                     if hasattr(module, 'load_weights'):
-                        module.load_weights(weights=[module_weights])
+                        if "self_attn.qkv_proj" in name:
+                            # Special handling for the fused QKV projection layer in Phi3.
+                            # The weights are interleaved and need to be split correctly before sharding.
+                            qkv_weight = module_weights['weight'][:]
+                            
+                            # Get model configuration parameters
+                            hidden_size = self.config.hidden_size
+                            num_heads = self.config.num_attention_heads
+                            num_kv_heads = self.config.num_key_value_heads
+                            head_dim = hidden_size // num_heads
+                            
+                            # Reshape and split the weights
+                            # The original layout is packed, we need to separate Q, K, and V.
+                            q_weight = qkv_weight[:hidden_size, :]
+                            k_weight = qkv_weight[hidden_size:hidden_size + num_kv_heads * head_dim, :]
+                            v_weight = qkv_weight[hidden_size + num_kv_heads * head_dim:, :]
+
+                            # Pass weights as a list of three dictionaries for the sharding logic
+                            module.load_weights(weights=[
+                                {'weight': q_weight},
+                                {'weight': k_weight},
+                                {'weight': v_weight}
+                            ])
+                        elif "mlp.gate_up_proj" in name:
+                            # Similar handling for the fused gate and up projections in the MLP
+                            gate_up_weight = module_weights['weight'][:]
+                            intermediate_size = self.config.intermediate_size
+
+                            gate_weight = gate_up_weight[:intermediate_size, :]
+                            up_weight = gate_up_weight[intermediate_size:, :]
+                            
+                            module.load_weights(weights=[
+                                {'weight': gate_weight},
+                                {'weight': up_weight}
+                            ])
+                        else:
+                            module.load_weights(weights=[module_weights])
                     else:
                         for n, p in module._parameters.items():
                             if p is not None:
