@@ -127,8 +127,8 @@ class Phi3Attention(Attention):
             config=model_config,
         )
         # Override the weights_loading_config for qkv_proj.
-        self.qkv_proj.weights_loading_config = WeightsLoadingConfig(
-            weight_mode=WeightMode.VANILLA, )
+        #self.qkv_proj.weights_loading_config = WeightsLoadingConfig(
+        #    weight_mode=WeightMode.VANILLA, )
 
 
 class Phi3DecoderLayer(DecoderLayer):
@@ -152,8 +152,8 @@ class Phi3DecoderLayer(DecoderLayer):
             config=model_config,
         )
         # Override the weights_loading_config for gate_up_proj.
-        self.mlp.gate_up_proj.weights_loading_config = WeightsLoadingConfig(
-            weight_mode=WeightMode.VANILLA, )
+        # self.mlp.gate_up_proj.weights_loading_config = WeightsLoadingConfig(
+        #   weight_mode=WeightMode.VANILLA, )
 
         self.input_layernorm = RMSNorm(
             hidden_size=config.hidden_size,
@@ -272,7 +272,11 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
                          vocab_size=model_config.pretrained_config.vocab_size)
 
     def load_weights(self, weights: dict):
-        # TODO (williamj): maybe need to update it for tp_size>1.
+        tp_size = self.model_config.mapping.tp_size
+        hidden_size = self.config.hidden_size
+        num_heads = self.config.num_attention_heads
+        num_kv_heads = self.config.num_key_value_heads
+        head_dim = hidden_size // num_heads
 
         def filter_weights(prefix: str, weights: dict):
             result = {}
@@ -292,7 +296,37 @@ class Phi3ForCausalLM(DecoderModelForCausalLM[Phi3Model, Phi3Config]):
 
                 module_weights = filter_weights(name, weights)
                 if hasattr(module, 'load_weights'):
-                    module.load_weights(weights=[module_weights])
+                    if "self_attn.qkv_proj" in name:
+                        # Special handling for the fused qkv_proj layer in Phi3
+                        # The weights need to be split correctly before sharding
+                        qkv_weight = module_weights['weight'][:]
+                        q_weight = qkv_weight[:hidden_size, :]
+                        k_weight = qkv_weight[hidden_size:hidden_size + num_kv_heads * head_dim, :]
+                        v_weight = qkv_weight[hidden_size + num_kv_heads * head_dim:, :]
+
+                        # Pass the weights as a list of three dictionaries for the sharding logic
+                        module.load_weights(weights=[
+                            {'weight': q_weight},
+                            {'weight': k_weight},
+                            {'weight': v_weight},
+                        ])
+                    elif "mlp.gate_up_proj" in name:
+                        # Special handling for the fused gate_up_proj layer in Phi3
+                        # The weights need to be split correctly before sharding
+                        intermediate_size = self.config.intermediate_size
+                        gate_up_weight = module_weights['weight'][:]
+                        gate_weight = gate_up_weight[:intermediate_size, :]
+                        up_weight = gate_up_weight[intermediate_size:, :]
+                        module.load_weights(weights=[
+                            {
+                                'weight': gate_weight
+                            },
+                            {
+                                'weight': up_weight
+                            },
+                        ])
+                    else:
+                        module.load_weights(weights=[module_weights])
                 else:
                     for n, p in module._parameters.items():
                         if p is not None:
